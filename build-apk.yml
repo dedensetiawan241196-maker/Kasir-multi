@@ -1,0 +1,108 @@
+name: Bangun APK Kasir
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_URL: https://dedensetiawan241196-maker.github.io/Kasir-ultimate
+  APP_ID: com.dedensetiawan.kasir
+  APP_NAME: Kasir Ultimate
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Siapkan file aplikasi dan ikon
+        run: |
+          mkdir -p www
+          if [ -f index.html ]; then cp index.html www/index.html; else curl -fsSL "$APP_URL/index.html" -o www/index.html; fi
+          test -s www/index.html
+          if [ ! -f icon-maskable-512.png ]; then curl -fsSL "$APP_URL/icon-maskable-512.png" -o icon-maskable-512.png; fi
+          test -s icon-maskable-512.png
+
+      - name: Buat proyek Android (Capacitor)
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/share@6
+          echo "{\"appId\":\"$APP_ID\",\"appName\":\"$APP_NAME\",\"webDir\":\"www\",\"server\":{\"androidScheme\":\"https\"}}" > capacitor.config.json
+          npx cap telemetry off || true
+          npx cap add android
+
+      - name: Atur izin kamera, ikon, warna, dan nomor versi
+        run: |
+          RES=android/app/src/main/res
+          MAN=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <application#' "$MAN"
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          sed -i 's/#3F51B5/#0f1412/g; s/#303F9F/#0f1412/g' $RES/values/colors.xml || true
+          pip install pillow
+          python3 - <<'PY'
+          from PIL import Image
+          import os, shutil
+          res = 'android/app/src/main/res'
+          src = Image.open('icon-maskable-512.png').convert('RGBA')
+          for d, sz in {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}.items():
+              p = f'{res}/mipmap-{d}'
+              os.makedirs(p, exist_ok=True)
+              im = src.resize((sz, sz), Image.LANCZOS)
+              im.save(f'{p}/ic_launcher.png')
+              im.save(f'{p}/ic_launcher_round.png')
+              fg = f'{p}/ic_launcher_foreground.png'
+              if os.path.exists(fg):
+                  os.remove(fg)
+          shutil.rmtree(f'{res}/mipmap-anydpi-v26', ignore_errors=True)
+          for root, _, files in os.walk(res):
+              for f in files:
+                  if f.startswith('splash') and f.endswith('.png'):
+                      Image.new('RGB', (16, 16), (15, 20, 18)).save(os.path.join(root, f))
+          PY
+
+      - name: Bangun APK
+        run: |
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Kunci tanda tangan (dibuat sekali lalu disimpan di repo ini)
+        run: |
+          if [ ! -f kasir.p12 ]; then
+            keytool -genkeypair -keystore kasir.p12 -storetype pkcs12 -storepass kasir123 -keypass kasir123 -alias kasir -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Kasir Ultimate"
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add kasir.p12
+            git commit -m "Tambah kunci tanda tangan APK"
+            git push
+          fi
+
+      - name: Tanda tangani APK
+        run: |
+          BT=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          $BT/zipalign -p 4 android/app/build/outputs/apk/release/app-release-unsigned.apk aligned.apk
+          $BT/apksigner sign --ks kasir.p12 --ks-pass pass:kasir123 --key-pass pass:kasir123 --out kasir-ultimate.apk aligned.apk
+          $BT/apksigner verify --print-certs kasir-ultimate.apk | head -4
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kasir-Ultimate-APK
+          path: kasir-ultimate.apk
+
+      - name: Buat rilis (APK bisa diunduh langsung)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "apk-${{ github.run_number }}" kasir-ultimate.apk --title "Kasir Ultimate (build ${{ github.run_number }})" --notes "APK mandiri: jalan tanpa Chrome dan tanpa internet."
